@@ -21,6 +21,8 @@ type MockOIDC struct {
 	ClientID     string
 	ClientSecret string
 
+	Host string
+
 	AccessTTL  time.Duration
 	RefreshTTL time.Duration
 
@@ -202,7 +204,11 @@ func (m *MockOIDC) Addr() string {
 	if m.tlsConfig != nil {
 		proto = "https"
 	}
-	return fmt.Sprintf("%s://%s", proto, m.Server.Addr)
+	if m.Host != "" {
+		return fmt.Sprintf("%s://%s", proto, m.Host)
+	} else {
+		return fmt.Sprintf("%s://%s", proto, m.Server.Addr)
+	}
 }
 
 // Issuer returns the OIDC Issuer that will be in `iss` token claims
