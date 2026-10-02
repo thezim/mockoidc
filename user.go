@@ -25,6 +25,8 @@ type User interface {
 // MockUser is a default implementation of the User interface
 type MockUser struct {
 	Subject           string
+	FirstName         string
+	LastName          string
 	Email             string
 	EmailVerified     bool
 	PreferredUsername string
@@ -38,6 +40,8 @@ type MockUser struct {
 func DefaultUser() *MockUser {
 	return &MockUser{
 		Subject:           "1234567890",
+		FirstName:         "jane",
+		LastName:          "doe",
 		Email:             "jane.doe@example.com",
 		PreferredUsername: "jane.doe",
 		Phone:             "555-987-6543",
@@ -48,6 +52,8 @@ func DefaultUser() *MockUser {
 }
 
 type mockUserinfo struct {
+	FirstName         string   `json:"given_name,omitempty"`
+	LastName          string   `json:"family_name,omitempty"`
 	Email             string   `json:"email,omitempty"`
 	PreferredUsername string   `json:"preferred_username,omitempty"`
 	Phone             string   `json:"phone_number,omitempty"`
@@ -63,6 +69,8 @@ func (u *MockUser) Userinfo(scope []string) ([]byte, error) {
 	user := u.scopedClone(scope)
 
 	info := &mockUserinfo{
+		FirstName:         user.FirstName,
+		LastName:          user.LastName,
 		Email:             user.Email,
 		PreferredUsername: user.PreferredUsername,
 		Phone:             user.Phone,
@@ -75,6 +83,8 @@ func (u *MockUser) Userinfo(scope []string) ([]byte, error) {
 
 type mockClaims struct {
 	*IDTokenClaims
+	FirstName         string   `json:"given_name,omitempty"`
+	LastName          string   `json:"family_name,omitempty"`
 	Email             string   `json:"email,omitempty"`
 	EmailVerified     bool     `json:"email_verified,omitempty"`
 	PreferredUsername string   `json:"preferred_username,omitempty"`
@@ -88,6 +98,8 @@ func (u *MockUser) Claims(scope []string, claims *IDTokenClaims) (jwt.Claims, er
 
 	return &mockClaims{
 		IDTokenClaims:     claims,
+		FirstName:         user.FirstName,
+		LastName:          user.LastName,
 		Email:             user.Email,
 		EmailVerified:     user.EmailVerified,
 		PreferredUsername: user.PreferredUsername,

@@ -58,6 +58,8 @@ var (
 	}
 	ClaimsSupported = []string{
 		"sub",
+		"given_name",
+		"family_name",
 		"email",
 		"email_verified",
 		"preferred_username",
