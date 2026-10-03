@@ -119,6 +119,8 @@ func (u *MockUser) scopedClone(scopes []string) *MockUser {
 			clone.PreferredUsername = u.PreferredUsername
 			clone.Address = u.Address
 			clone.Phone = u.Phone
+			clone.FirstName = u.FirstName
+			clone.LastName = u.LastName
 		case "email":
 			clone.Email = u.Email
 			clone.EmailVerified = u.EmailVerified
