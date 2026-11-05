@@ -177,12 +177,15 @@ func (m *MockOIDC) Token(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	config := m.Config()
+	config.Issuer = m.endpointURL(req, IssuerBase)
+
 	tr := &tokenResponse{
 		RefreshToken: req.Form.Get("refresh_token"),
 		TokenType:    "bearer",
 		ExpiresIn:    m.AccessTTL,
 	}
-	err = m.setTokens(tr, session, grantType)
+	err = m.setTokens(config, tr, session, grantType)
 	if err != nil {
 		internalServerError(rw, err.Error())
 		return
@@ -289,20 +292,20 @@ func (m *MockOIDC) validateRefreshGrant(rw http.ResponseWriter, req *http.Reques
 	return session, true
 }
 
-func (m *MockOIDC) setTokens(tr *tokenResponse, s *Session, grantType string) error {
+func (m *MockOIDC) setTokens(config *Config, tr *tokenResponse, s *Session, grantType string) error {
 	var err error
-	tr.AccessToken, err = s.AccessToken(m.Config(), m.Keypair, m.Now())
+	tr.AccessToken, err = s.AccessToken(config, m.Keypair, m.Now())
 	if err != nil {
 		return err
 	}
 	if len(s.Scopes) > 0 && s.Scopes[0] == openidScope {
-		tr.IDToken, err = s.IDToken(m.Config(), m.Keypair, m.Now())
+		tr.IDToken, err = s.IDToken(config, m.Keypair, m.Now())
 		if err != nil {
 			return err
 		}
 	}
 	if grantType != "refresh_token" {
-		tr.RefreshToken, err = s.RefreshToken(m.Config(), m.Keypair, m.Now())
+		tr.RefreshToken, err = s.RefreshToken(config, m.Keypair, m.Now())
 		if err != nil {
 			return err
 		}
@@ -352,13 +355,13 @@ type discoveryResponse struct {
 
 // Discovery renders the OIDC discovery document and partial RFC-8414 authorization
 // server metadata hosted at `/.well-known/openid-configuration`.
-func (m *MockOIDC) Discovery(rw http.ResponseWriter, _ *http.Request) {
+func (m *MockOIDC) Discovery(rw http.ResponseWriter, req *http.Request) {
 	discovery := &discoveryResponse{
-		Issuer:                m.Issuer(),
-		AuthorizationEndpoint: m.AuthorizationEndpoint(),
-		TokenEndpoint:         m.TokenEndpoint(),
-		JWKSUri:               m.JWKSEndpoint(),
-		UserinfoEndpoint:      m.UserinfoEndpoint(),
+		Issuer:                m.endpointURL(req, IssuerBase),
+		AuthorizationEndpoint: m.endpointURL(req, AuthorizationEndpoint),
+		TokenEndpoint:         m.endpointURL(req, TokenEndpoint),
+		JWKSUri:               m.endpointURL(req, JWKSEndpoint),
+		UserinfoEndpoint:      m.endpointURL(req, UserinfoEndpoint),
 
 		GrantTypesSupported:               GrantTypesSupported,
 		ResponseTypesSupported:            ResponseTypesSupported,

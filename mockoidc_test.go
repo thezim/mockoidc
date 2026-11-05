@@ -8,12 +8,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/oauth2-proxy/mockoidc"
 	"github.com/stretchr/testify/assert"
+	"github.com/thezim/mockoidc"
 )
 
 const TestNow = 1234567890
@@ -223,6 +224,139 @@ func TestRun(t *testing.T) {
 	resp, err = httpClient.Do(refreshReq2)
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+}
+
+func TestRun_ForwardedHeaders(t *testing.T) {
+	setTime()
+	defer resetTime()
+
+	m, err := mockoidc.NewServer(nil)
+	assert.NoError(t, err)
+	m.UseForwardedHeaders = true
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	assert.NoError(t, err)
+
+	err = m.Start(ln, nil)
+	assert.NoError(t, err)
+	defer m.Shutdown()
+
+	const (
+		publicHost = "mockoidc.example.com"
+		state      = "abcdef1234567890"
+		nonce      = "0987654321fedcba"
+	)
+
+	// Emulate the headers a load balancer terminating TLS sends to us.
+	forwarded := func(req *http.Request) *http.Request {
+		req.Header.Set("X-Forwarded-Proto", "https")
+		req.Header.Set("X-Forwarded-Host", publicHost)
+		return req
+	}
+
+	publicIssuer := "https://" + publicHost + "/oidc"
+
+	// **********************************************************************
+	// Stage 0: Discovery advertises the public https URLs
+	// **********************************************************************
+	discoveryReq, err := http.NewRequest(http.MethodGet, m.DiscoveryEndpoint(), nil)
+	assert.NoError(t, err)
+
+	resp, err := httpClient.Do(forwarded(discoveryReq))
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	discovery := make(map[string]interface{})
+	err = json.NewDecoder(resp.Body).Decode(&discovery)
+	resp.Body.Close()
+	assert.NoError(t, err)
+
+	assert.Equal(t, publicIssuer, discovery["issuer"])
+	assert.Equal(t, publicIssuer+"/authorize", discovery["authorization_endpoint"])
+	assert.Equal(t, publicIssuer+"/token", discovery["token_endpoint"])
+	assert.Equal(t, publicIssuer+"/.well-known/jwks.json", discovery["jwks_uri"])
+
+	// **********************************************************************
+	// Stage 1: Emulate client to IdP request
+	// **********************************************************************
+	authorizeQuery := url.Values{}
+	authorizeQuery.Set("client_id", m.ClientID)
+	authorizeQuery.Set("scope", "openid email profile")
+	authorizeQuery.Set("response_type", "code")
+	authorizeQuery.Set("redirect_uri", "http://127.0.0.1/oauth2/callback")
+	authorizeQuery.Set("state", state)
+	authorizeQuery.Set("nonce", nonce)
+
+	authorizeURL, err := url.Parse(m.AuthorizationEndpoint())
+	assert.NoError(t, err)
+	authorizeURL.RawQuery = authorizeQuery.Encode()
+
+	authorizeReq, err := http.NewRequest(http.MethodGet, authorizeURL.String(), nil)
+	assert.NoError(t, err)
+
+	resp, err = httpClient.Do(forwarded(authorizeReq))
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+
+	appRedirect, err := url.Parse(resp.Header.Get("Location"))
+	assert.NoError(t, err)
+	assert.Equal(t, state, appRedirect.Query().Get("state"))
+
+	// **********************************************************************
+	// Stage 2: Tokens carry the same public issuer as discovery
+	// **********************************************************************
+	tokenForm := url.Values{}
+	tokenForm.Set("client_id", m.ClientID)
+	tokenForm.Set("client_secret", m.ClientSecret)
+	tokenForm.Set("grant_type", "authorization_code")
+	tokenForm.Set("code", appRedirect.Query().Get("code"))
+
+	tokenReq, err := http.NewRequest(
+		http.MethodPost, m.TokenEndpoint(), strings.NewReader(tokenForm.Encode()))
+	assert.NoError(t, err)
+	tokenReq.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err = httpClient.Do(forwarded(tokenReq))
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	tokens := make(map[string]interface{})
+	err = json.NewDecoder(resp.Body).Decode(&tokens)
+	resp.Body.Close()
+	assert.NoError(t, err)
+
+	for _, key := range []string{"access_token", "id_token", "refresh_token"} {
+		token, err := m.Keypair.VerifyJWT(tokens[key].(string), m.Now)
+		assert.NoError(t, err)
+
+		claims, ok := token.Claims.(jwt.MapClaims)
+		assert.True(t, ok)
+		assert.Equal(t, publicIssuer, claims["iss"])
+	}
+}
+
+func TestMockOIDC_Addr_HostOverride(t *testing.T) {
+	m := &mockoidc.MockOIDC{
+		Server: &http.Server{
+			Addr: "127.0.0.1:8080",
+		},
+		Host: "mockoidc.example.com",
+	}
+
+	assert.Equal(t, "http://mockoidc.example.com", m.Addr())
+	assert.Equal(t, "http://mockoidc.example.com/oidc", m.Issuer())
+
+	// A full URL also overrides the scheme, since TLS may be terminated
+	// by a proxy in front of MockOIDC.
+	m.Host = "https://mockoidc.example.com"
+	assert.Equal(t, "https://mockoidc.example.com", m.Addr())
+	assert.Equal(t, "https://mockoidc.example.com/oidc", m.Issuer())
+	assert.Equal(t, "https://mockoidc.example.com/oidc", m.Config().Issuer)
+	assert.Equal(t, "https://mockoidc.example.com/oidc/token", m.TokenEndpoint())
+
+	// Trailing slashes don't end up in URLs
+	m.Host = "https://mockoidc.example.com/"
+	assert.Equal(t, "https://mockoidc.example.com", m.Addr())
 }
 
 func TestMockOIDC_Config(t *testing.T) {

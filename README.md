@@ -14,7 +14,7 @@ Created by @NickMeves and @egrif during the [Greenhouse Software](https://medium
 
 Import the package
 ```
-import "github.com/oauth2-proxy/mockoidc"
+import "github.com/thezim/mockoidc"
 ```
 
 Start the MockOIDC Server. This will spin up a minimal OIDC server in its own
@@ -50,6 +50,55 @@ tlsConfig = &tls.Config{
 
 m, _ := mockoidc.RunTLS(tlsConfig)
 defer m.Shutdown()
+```
+
+### Behind a Load Balancer / Reverse Proxy
+
+When running behind a load balancer that terminates TLS, the MockOIDC server
+itself sees plain HTTP on its internal address. Enable `UseForwardedHeaders`
+so the discovery document and the `iss` claim of issued tokens use the scheme
+and host sent by the load balancer:
+
+```
+m, _ := mockoidc.NewServer(nil)
+m.UseForwardedHeaders = true
+
+ln, _ := net.Listen("tcp", "127.0.0.1:8080")
+m.Start(ln, nil)
+defer m.Shutdown()
+```
+
+The server then honors `X-Forwarded-Proto` and `X-Forwarded-Host` (falling
+back to the `Host` header):
+
+```
+X-Forwarded-Proto: https
+X-Forwarded-Host: mockoidc.example.com
+```
+
+When a chain of proxies appends to the headers, the first (leftmost) value is
+used. `X-Forwarded-For` is not used, since client IPs never appear in the
+URLs MockOIDC emits.
+
+The static accessors (`m.Addr()`, `m.Issuer()`, `m.Config()` and the endpoint
+methods) have no request to inspect, so they can't use the headers. Set `Host`
+to the public address for them. It may include the scheme when TLS is
+terminated upstream:
+
+```
+m.Host = "https://mockoidc.example.com"
+```
+
+Example nginx configuration proxying to MockOIDC:
+
+```nginx
+location /oidc/ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host  $host;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+}
 ```
 
 ### Endpoints

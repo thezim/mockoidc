@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -21,7 +22,18 @@ type MockOIDC struct {
 	ClientID     string
 	ClientSecret string
 
+	// Host overrides the host used to build endpoint URLs. Set it to a
+	// hostname (e.g. "mockoidc.example.com") or a full URL
+	// (e.g. "https://mockoidc.example.com") when running behind a proxy
+	// that terminates TLS.
 	Host string
+
+	// UseForwardedHeaders derives the scheme and host of URLs emitted while
+	// handling requests from the X-Forwarded-Proto and X-Forwarded-Host
+	// headers (falling back to the Host header), instead of the statically
+	// configured address. Enable this when running behind a reverse proxy
+	// or load balancer that terminates TLS.
+	UseForwardedHeaders bool
 
 	AccessTTL  time.Duration
 	RefreshTTL time.Duration
@@ -195,10 +207,15 @@ func (m *MockOIDC) Now() time.Time {
 	return NowFunc().Add(m.fastForward)
 }
 
-// Addr returns the server address (if started)
+// Addr returns the server address (if started). A Host set to a full URL
+// (e.g. "https://mockoidc.example.com") is returned as-is, otherwise the
+// scheme is inferred from the configured TLS config.
 func (m *MockOIDC) Addr() string {
 	if m.Server == nil {
 		return ""
+	}
+	if strings.HasPrefix(m.Host, "http://") || strings.HasPrefix(m.Host, "https://") {
+		return strings.TrimSuffix(m.Host, "/")
 	}
 	proto := "http"
 	if m.tlsConfig != nil {
@@ -206,9 +223,63 @@ func (m *MockOIDC) Addr() string {
 	}
 	if m.Host != "" {
 		return fmt.Sprintf("%s://%s", proto, m.Host)
-	} else {
-		return fmt.Sprintf("%s://%s", proto, m.Server.Addr)
 	}
+	return fmt.Sprintf("%s://%s", proto, m.Server.Addr)
+}
+
+// baseURL returns the scheme://host base to use for URLs emitted while
+// handling req. When UseForwardedHeaders is enabled, the X-Forwarded-Proto
+// and X-Forwarded-Host headers are honored (falling back to the Host header)
+// so MockOIDC can run behind a proxy that terminates TLS. Otherwise the
+// statically configured address is returned.
+func (m *MockOIDC) baseURL(req *http.Request) string {
+	if m.Server == nil {
+		return ""
+	}
+	if !m.UseForwardedHeaders || req == nil {
+		return m.Addr()
+	}
+
+	proto := strings.ToLower(firstHeaderValue(req.Header.Get("X-Forwarded-Proto")))
+	if proto != "http" && proto != "https" {
+		proto = ""
+	}
+	if proto == "" {
+		if req.TLS != nil || m.tlsConfig != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+
+	host := firstHeaderValue(req.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = req.Host
+	}
+	if host == "" {
+		return m.Addr()
+	}
+
+	return fmt.Sprintf("%s://%s", proto, host)
+}
+
+// endpointURL builds a full endpoint URL for the passed request using the
+// request-aware base URL. It returns an empty string if MockOIDC isn't
+// started.
+func (m *MockOIDC) endpointURL(req *http.Request, endpoint string) string {
+	if base := m.baseURL(req); base != "" {
+		return base + endpoint
+	}
+	return ""
+}
+
+// firstHeaderValue returns the first value of a comma-separated forwarded
+// header, which is the value set by the proxy closest to the client.
+func firstHeaderValue(value string) string {
+	if value == "" {
+		return ""
+	}
+	return strings.TrimSpace(strings.Split(value, ",")[0])
 }
 
 // Issuer returns the OIDC Issuer that will be in `iss` token claims

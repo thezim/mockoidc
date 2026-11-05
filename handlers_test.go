@@ -11,8 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/oauth2-proxy/mockoidc"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
+	"github.com/thezim/mockoidc"
 )
 
 func TestMockOIDC_Authorize(t *testing.T) {
@@ -319,6 +320,143 @@ func TestMockOIDC_Discovery(t *testing.T) {
 	assert.Equal(t, oidcCfg["userinfo_endpoint"], m.UserinfoEndpoint())
 	assert.Equal(t, oidcCfg["jwks_uri"], m.JWKSEndpoint())
 	assert.ElementsMatch(t, oidcCfg["code_challenge_methods_supported"], m.CodeChallengeMethodsSupported)
+}
+
+func TestMockOIDC_Discovery_ForwardedHeaders(t *testing.T) {
+	m := &mockoidc.MockOIDC{
+		Server: &http.Server{
+			Addr: "127.0.0.1:8080",
+		},
+		UseForwardedHeaders:           true,
+		CodeChallengeMethodsSupported: []string{"some_random_value"},
+	}
+
+	oidcCfg := forwardedDiscovery(t, m, "https", "mockoidc.example.com")
+
+	assert.Equal(t, "https://mockoidc.example.com/oidc", oidcCfg["issuer"])
+	assert.Equal(t, "https://mockoidc.example.com/oidc/authorize", oidcCfg["authorization_endpoint"])
+	assert.Equal(t, "https://mockoidc.example.com/oidc/token", oidcCfg["token_endpoint"])
+	assert.Equal(t, "https://mockoidc.example.com/oidc/userinfo", oidcCfg["userinfo_endpoint"])
+	assert.Equal(t, "https://mockoidc.example.com/oidc/.well-known/jwks.json", oidcCfg["jwks_uri"])
+}
+
+func TestMockOIDC_Discovery_ForwardedHeaders_MultipleProxies(t *testing.T) {
+	m := &mockoidc.MockOIDC{
+		Server: &http.Server{
+			Addr: "127.0.0.1:8080",
+		},
+		UseForwardedHeaders: true,
+	}
+
+	// A chain of proxies appends its own values. The first value is the
+	// one that applies to the client.
+	oidcCfg := forwardedDiscovery(t, m, "https, http", "mockoidc.example.com, internal.service:8080")
+
+	assert.Equal(t, "https://mockoidc.example.com/oidc", oidcCfg["issuer"])
+	assert.Equal(t, "https://mockoidc.example.com/oidc/token", oidcCfg["token_endpoint"])
+}
+
+func TestMockOIDC_Discovery_ForwardedHeaders_Disabled(t *testing.T) {
+	m := &mockoidc.MockOIDC{
+		Server: &http.Server{
+			Addr: "127.0.0.1:8080",
+		},
+	}
+
+	oidcCfg := forwardedDiscovery(t, m, "https", "mockoidc.example.com")
+
+	// Without the opt-in, forwarded headers are ignored
+	assert.Equal(t, "http://127.0.0.1:8080/oidc", oidcCfg["issuer"])
+	assert.Equal(t, "http://127.0.0.1:8080/oidc/token", oidcCfg["token_endpoint"])
+}
+
+func TestMockOIDC_Discovery_ForwardedHeaders_HostHeaderFallback(t *testing.T) {
+	m := &mockoidc.MockOIDC{
+		Server: &http.Server{
+			Addr: "127.0.0.1:8080",
+		},
+		UseForwardedHeaders: true,
+	}
+
+	// A proxy that preserves the Host header doesn't need to set
+	// X-Forwarded-Host.
+	req := httptest.NewRequest(
+		http.MethodGet, "http://mockoidc.example.com"+mockoidc.DiscoveryEndpoint, nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+
+	recorder := httptest.NewRecorder()
+	m.Discovery(recorder, req)
+
+	oidcCfg := make(map[string]interface{})
+	err := getJSON(recorder, &oidcCfg)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "https://mockoidc.example.com/oidc", oidcCfg["issuer"])
+	assert.Equal(t, "https://mockoidc.example.com/oidc/token", oidcCfg["token_endpoint"])
+}
+
+func TestMockOIDC_Token_ForwardedHeaders(t *testing.T) {
+	m, err := mockoidc.NewServer(nil)
+	assert.NoError(t, err)
+	m.Server = &http.Server{Addr: "127.0.0.1:8080"}
+	m.UseForwardedHeaders = true
+
+	session, err := m.SessionStore.NewSession(
+		"openid email profile", "nonce", mockoidc.DefaultUser(), "", "")
+	assert.NoError(t, err)
+
+	data := url.Values{}
+	data.Set("client_id", m.ClientID)
+	data.Set("client_secret", m.ClientSecret)
+	data.Set("code", session.SessionID)
+	data.Set("grant_type", "authorization_code")
+
+	rr := httptest.NewRecorder()
+	req, err := http.NewRequest(
+		http.MethodPost, mockoidc.TokenEndpoint, strings.NewReader(data.Encode()))
+	assert.NoError(t, err)
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "mockoidc.example.com")
+	m.Token(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+
+	tokenResp := make(map[string]interface{})
+	err = getJSON(rr, &tokenResp)
+	assert.NoError(t, err)
+
+	// All issued tokens carry the public issuer, matching what the
+	// discovery document advertised behind the proxy.
+	for _, key := range []string{"access_token", "id_token", "refresh_token"} {
+		token, err := m.Keypair.VerifyJWT(tokenResp[key].(string), m.Now)
+		assert.NoError(t, err)
+
+		claims, ok := token.Claims.(jwt.MapClaims)
+		assert.True(t, ok)
+		assert.Equal(t, "https://mockoidc.example.com/oidc", claims["iss"])
+	}
+}
+
+func forwardedDiscovery(t *testing.T, m *mockoidc.MockOIDC, proto, host string) map[string]interface{} {
+	t.Helper()
+
+	req := httptest.NewRequest(
+		http.MethodGet, "http://internal.service:8080"+mockoidc.DiscoveryEndpoint, nil)
+	if proto != "" {
+		req.Header.Set("X-Forwarded-Proto", proto)
+	}
+	if host != "" {
+		req.Header.Set("X-Forwarded-Host", host)
+	}
+
+	recorder := httptest.NewRecorder()
+	m.Discovery(recorder, req)
+
+	oidcCfg := make(map[string]interface{})
+	err := getJSON(recorder, &oidcCfg)
+	assert.NoError(t, err)
+	return oidcCfg
 }
 
 func getJSON(res *httptest.ResponseRecorder, target interface{}) error {
