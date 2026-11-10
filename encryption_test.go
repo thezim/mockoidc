@@ -93,3 +93,40 @@ func TestKeypair_SignJWTVerifyJWT(t *testing.T) {
 		})
 	}
 }
+
+func TestKeypair_ParseJWT(t *testing.T) {
+	keypair, err := mockoidc.DefaultKeypair()
+	assert.NoError(t, err)
+
+	expiredClaims := &jwt.RegisteredClaims{
+		Audience:  audience,
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(-time.Duration(1) * time.Hour)),
+		ID:        "0123456789abcdef",
+		IssuedAt:  jwt.NewNumericDate(time.Now().Add(-time.Duration(2) * time.Hour)),
+		Issuer:    issuer,
+		NotBefore: jwt.NewNumericDate(time.Time{}),
+		Subject:   "123456789",
+	}
+
+	tokenStr, err := keypair.SignJWT(expiredClaims)
+	assert.NoError(t, err)
+
+	// VerifyJWT rejects the expired token...
+	_, err = keypair.VerifyJWT(tokenStr, mockoidc.NowFunc)
+	assert.Error(t, err)
+
+	// ...but ParseJWT accepts it so logout can process expired hints
+	token, err := keypair.ParseJWT(tokenStr)
+	assert.NoError(t, err)
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	assert.True(t, ok)
+	assert.Equal(t, "0123456789abcdef", claims["jti"])
+
+	// Signature verification still applies
+	otherKeypair, err := mockoidc.RandomKeypair(512)
+	assert.NoError(t, err)
+
+	_, err = otherKeypair.ParseJWT(tokenStr)
+	assert.Error(t, err)
+}

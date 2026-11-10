@@ -69,6 +69,12 @@ func (ss *SessionStore) GetSessionByID(id string) (*Session, error) {
 	return session, nil
 }
 
+// DeleteSession removes the Session with the passed ID from the store, if
+// present. Logout is idempotent, so deleting a missing session is fine.
+func (ss *SessionStore) DeleteSession(id string) {
+	delete(ss.Store, id)
+}
+
 // GetSessionByToken decodes a token and looks up a Session based on the
 // session ID claim.
 func (ss *SessionStore) GetSessionByToken(token *jwt.Token) (*Session, error) {

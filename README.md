@@ -117,7 +117,27 @@ m.AuthorizationEndpoint()
 m.TokenEndpoint()
 m.UserinfoEndpoint()
 m.JWKSEndpoint()
+m.LogoutEndpoint()
+m.EndSessionEndpoint()
 ```
+
+### Logout / End Session
+
+The `logout_endpoint` (`/oidc/logout`) and the `end_session_endpoint`
+(`/oidc/endsession`, advertised in the discovery document) both implement
+RP-Initiated Logout. They accept GET and POST requests with the standard
+parameters:
+
+* `id_token_hint` - when the hint was signed by this server and references
+  a known session, that session is deleted, so its tokens can no longer be
+  used. Expired ID Tokens are accepted (their signature is verified, but
+  their claims are not).
+* `post_logout_redirect_uri` - if set, the browser is redirected here with
+  a `302`.
+* `state` - appended to the redirect.
+
+Without a `post_logout_redirect_uri`, a minimal "Logged out" page is
+returned instead.
 
 ### Seeding Users and Codes
 

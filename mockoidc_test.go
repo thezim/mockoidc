@@ -224,6 +224,41 @@ func TestRun(t *testing.T) {
 	resp, err = httpClient.Do(refreshReq2)
 	assert.NoError(t, err)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+
+	// ************************************************************************
+	// Stage 8: RP-Initiated Logout
+	// ************************************************************************
+	logoutQuery := url.Values{}
+	logoutQuery.Set("id_token_hint", tokens["id_token"].(string))
+	logoutQuery.Set("post_logout_redirect_uri", "http://127.0.0.1/oauth2/sign_out")
+	logoutQuery.Set("state", state)
+
+	logoutReq, err := http.NewRequest(
+		http.MethodGet, m.EndSessionEndpoint()+"?"+logoutQuery.Encode(), nil)
+	assert.NoError(t, err)
+
+	resp, err = httpClient.Do(logoutReq)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+
+	logoutRedirect, err := url.Parse(resp.Header.Get("Location"))
+	assert.NoError(t, err)
+	assert.Equal(t, "http://127.0.0.1/oauth2/sign_out",
+		logoutRedirect.Scheme+"://"+logoutRedirect.Host+logoutRedirect.Path)
+	assert.Equal(t, state, logoutRedirect.Query().Get("state"))
+
+	// The session behind the ID Token hint was invalidated
+	_, err = m.SessionStore.GetSessionByID(code)
+	assert.Error(t, err)
+
+	// The /oidc/logout alias works the same way and is idempotent
+	aliasReq, err := http.NewRequest(
+		http.MethodGet, m.LogoutEndpoint()+"?"+logoutQuery.Encode(), nil)
+	assert.NoError(t, err)
+
+	resp, err = httpClient.Do(aliasReq)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
 }
 
 func TestRun_ForwardedHeaders(t *testing.T) {
@@ -275,6 +310,7 @@ func TestRun_ForwardedHeaders(t *testing.T) {
 	assert.Equal(t, publicIssuer+"/authorize", discovery["authorization_endpoint"])
 	assert.Equal(t, publicIssuer+"/token", discovery["token_endpoint"])
 	assert.Equal(t, publicIssuer+"/.well-known/jwks.json", discovery["jwks_uri"])
+	assert.Equal(t, publicIssuer+"/endsession", discovery["end_session_endpoint"])
 
 	// **********************************************************************
 	// Stage 1: Emulate client to IdP request

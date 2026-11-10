@@ -128,6 +128,8 @@ func (m *MockOIDC) Start(ln net.Listener, cfg *tls.Config) error {
 	handler.Handle(UserinfoEndpoint, m.chainMiddleware(m.Userinfo))
 	handler.Handle(JWKSEndpoint, m.chainMiddleware(m.JWKS))
 	handler.Handle(DiscoveryEndpoint, m.chainMiddleware(m.Discovery))
+	handler.Handle(LogoutEndpoint, m.chainMiddleware(m.Logout))
+	handler.Handle(EndSessionEndpoint, m.chainMiddleware(m.Logout))
 
 	m.Server = &http.Server{
 		Addr:      ln.Addr().String(),
@@ -320,6 +322,22 @@ func (m *MockOIDC) UserinfoEndpoint() string {
 		return ""
 	}
 	return m.Addr() + UserinfoEndpoint
+}
+
+// LogoutEndpoint returns the OIDC `logout_endpoint`
+func (m *MockOIDC) LogoutEndpoint() string {
+	if m.Server == nil {
+		return ""
+	}
+	return m.Addr() + LogoutEndpoint
+}
+
+// EndSessionEndpoint returns the OIDC `end_session_endpoint`
+func (m *MockOIDC) EndSessionEndpoint() string {
+	if m.Server == nil {
+		return ""
+	}
+	return m.Addr() + EndSessionEndpoint
 }
 
 // JWKSEndpoint returns the OIDC `jwks_uri`

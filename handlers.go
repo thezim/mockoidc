@@ -19,6 +19,8 @@ const (
 	UserinfoEndpoint      = "/oidc/userinfo"
 	JWKSEndpoint          = "/oidc/.well-known/jwks.json"
 	DiscoveryEndpoint     = "/oidc/.well-known/openid-configuration"
+	LogoutEndpoint        = "/oidc/logout"
+	EndSessionEndpoint    = "/oidc/endsession"
 
 	InvalidRequest       = "invalid_request"
 	InvalidClient        = "invalid_client"
@@ -338,12 +340,83 @@ func (m *MockOIDC) Userinfo(rw http.ResponseWriter, req *http.Request) {
 	jsonResponse(rw, resp)
 }
 
+// Logout implements RP-Initiated Logout (OpenID Connect RP-Initiated
+// Logout 1.0). It backs both the `logout_endpoint` at `/oidc/logout` and
+// the `end_session_endpoint` at `/oidc/endsession` advertised in the
+// discovery document.
+//
+// The `id_token_hint`, `post_logout_redirect_uri` and `state` parameters
+// are honored. When the id_token_hint references a known Session, that
+// Session is deleted so its tokens can no longer be used. The signature
+// of the hint is verified, but its claims are not, since the spec allows
+// expired ID Tokens to be sent as hints. Hints that don't verify are
+// ignored.
+func (m *MockOIDC) Logout(rw http.ResponseWriter, req *http.Request) {
+	err := req.ParseForm()
+	if err != nil {
+		internalServerError(rw, err.Error())
+		return
+	}
+
+	if hint := req.Form.Get("id_token_hint"); hint != "" {
+		m.deleteSessionByHint(hint)
+	}
+
+	redirectURI := req.Form.Get("post_logout_redirect_uri")
+	if redirectURI == "" {
+		// Without a redirect URI there is nowhere to send the browser;
+		// render a minimal logout confirmation page.
+		rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+		rw.WriteHeader(http.StatusOK)
+		_, err = rw.Write([]byte("<!DOCTYPE html><html><body><p>Logged out</p></body></html>"))
+		if err != nil {
+			panic(err)
+		}
+		return
+	}
+
+	uri, err := url.Parse(redirectURI)
+	if err != nil {
+		errorResponse(rw, InvalidRequest,
+			fmt.Sprintf("Invalid post_logout_redirect_uri: %s", redirectURI),
+			http.StatusBadRequest)
+		return
+	}
+	if state := req.Form.Get("state"); state != "" {
+		params, _ := url.ParseQuery(uri.RawQuery)
+		params.Set("state", state)
+		uri.RawQuery = params.Encode()
+	}
+
+	http.Redirect(rw, req, uri.String(), http.StatusFound)
+}
+
+// deleteSessionByHint deletes the Session referenced by an id_token_hint,
+// ignoring hints that don't verify or don't reference a known session.
+func (m *MockOIDC) deleteSessionByHint(hint string) {
+	token, err := m.Keypair.ParseJWT(hint)
+	if err != nil {
+		return
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return
+	}
+	sessionID, ok := claims["jti"].(string)
+	if !ok {
+		return
+	}
+	m.SessionStore.DeleteSession(sessionID)
+}
+
 type discoveryResponse struct {
 	Issuer                string `json:"issuer"`
 	AuthorizationEndpoint string `json:"authorization_endpoint"`
 	TokenEndpoint         string `json:"token_endpoint"`
 	JWKSUri               string `json:"jwks_uri"`
 	UserinfoEndpoint      string `json:"userinfo_endpoint"`
+	EndSessionEndpoint    string `json:"end_session_endpoint"`
 
 	GrantTypesSupported               []string `json:"grant_types_supported"`
 	ResponseTypesSupported            []string `json:"response_types_supported"`
@@ -364,6 +437,7 @@ func (m *MockOIDC) Discovery(rw http.ResponseWriter, req *http.Request) {
 		TokenEndpoint:         m.endpointURL(req, TokenEndpoint),
 		JWKSUri:               m.endpointURL(req, JWKSEndpoint),
 		UserinfoEndpoint:      m.endpointURL(req, UserinfoEndpoint),
+		EndSessionEndpoint:    m.endpointURL(req, EndSessionEndpoint),
 
 		GrantTypesSupported:               GrantTypesSupported,
 		ResponseTypesSupported:            ResponseTypesSupported,
